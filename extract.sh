@@ -11,6 +11,8 @@ ARCHIVE=${1:?Usage: $0 /path/to/tailbench.tar.gz}
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SERVER_DIR="$DIR/img-dnn/server"
 CLIENT_DIR="$DIR/img-dnn/client"
+IMGDNN_SERVER_BUILD="$SERVER_DIR/build"
+IMGDNN_CLIENT_BUILD="$CLIENT_DIR/build"
 MT_SERVER_BUILD="$DIR/masstree/server/build"
 MT_CLIENT_BUILD="$DIR/masstree/client/build"
 SILO_SERVER_BUILD="$DIR/silo/server/build"
@@ -23,8 +25,9 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 tar -xzf "$ARCHIVE" -C "$TMP" \
-    tailbench-v0.9/img-dnn/img-dnn_server_networked \
-    tailbench-v0.9/img-dnn/img-dnn_client_networked \
+    tailbench-v0.9/img-dnn/img-dnn.o \
+    tailbench-v0.9/img-dnn/common.o \
+    tailbench-v0.9/img-dnn/client.o \
     tailbench.inputs/img-dnn/models/model.xml \
     tailbench.inputs/img-dnn/mnist/t10k-images-idx3-ubyte \
     tailbench.inputs/img-dnn/mnist/t10k-labels-idx1-ubyte \
@@ -108,20 +111,34 @@ tar -xzf "$ARCHIVE" -C "$TMP" \
     tailbench-v0.9/moses/moses.ini.template
 
 mkdir -p "$CLIENT_DIR/mnist"
-cp "$TMP/tailbench-v0.9/img-dnn/img-dnn_server_networked" "$SERVER_DIR/"
 cp "$TMP/tailbench.inputs/img-dnn/models/model.xml" "$SERVER_DIR/"
-cp "$TMP/tailbench-v0.9/img-dnn/img-dnn_client_networked" "$CLIENT_DIR/"
 cp "$TMP/tailbench.inputs/img-dnn/mnist/t10k-images-idx3-ubyte" "$CLIENT_DIR/mnist/"
 cp "$TMP/tailbench.inputs/img-dnn/mnist/t10k-labels-idx1-ubyte" "$CLIENT_DIR/mnist/"
 
-# masstree's prebuilt mttest_*_networked binaries hit a bug in TailBench's
-# shared recvfull() helper: each retry re-requests the *original* length
-# instead of the remaining bytes, so a partial read can overshoot into the
-# next message. This only surfaces for masstree's 10240-byte aggregated
-# requests (img-dnn's small per-image requests always complete in one recv()).
-# Rather than patch prebuilt binaries, recompile the harness against the
-# existing masstree object files with the one-line fix below, and relink
-# using the same recipe as masstree/GNUmakefile.
+# TailBench's shared recvfull() helper has a bug: each retry re-requests the
+# *original* length instead of the remaining bytes, so a partial read can
+# overshoot into the next message (server dies with "ERROR! recvd != expected").
+# It surfaces whenever a request spans several recv() calls: masstree's
+# 10240-byte aggregated requests, silo's TPC-C requests, sphinx's audio, and
+# img-dnn's 6272-byte requests (784 doubles, larger than one MTU; observed
+# as "recvd = 7676, expected = 6272" when the receiving kernel delivers the
+# segments separately). Rather than patch prebuilt binaries, recompile the
+# harness .cpp files against a patched helpers.h and relink them with the
+# prebuilt benchmark object files, using each benchmark's own link recipe.
+
+# img-dnn: prebuilt img-dnn.o/common.o/client.o (see img-dnn/Makefile). Its own
+# client.o is renamed to imgdnn_client.o to avoid clashing with the harness's
+# client.cpp -> client.o, both needed to link the client.
+mkdir -p "$IMGDNN_SERVER_BUILD" "$IMGDNN_CLIENT_BUILD"
+
+cp "$TMP"/tailbench-v0.9/img-dnn/{img-dnn.o,common.o} "$IMGDNN_SERVER_BUILD/"
+cp "$TMP"/tailbench-v0.9/harness/{dist.h,msgs.h,server.h,client.h,tbench_server.h,tbench_server_networked.cpp} "$IMGDNN_SERVER_BUILD/"
+
+cp "$TMP/tailbench-v0.9/img-dnn/common.o" "$IMGDNN_CLIENT_BUILD/"
+cp "$TMP/tailbench-v0.9/img-dnn/client.o" "$IMGDNN_CLIENT_BUILD/imgdnn_client.o"
+cp "$TMP"/tailbench-v0.9/harness/{dist.h,msgs.h,client.h,tbench_client.h,tbench_client_networked.cpp,client.cpp} "$IMGDNN_CLIENT_BUILD/"
+
+# masstree: relink using the same recipe as masstree/GNUmakefile.
 mkdir -p "$MT_SERVER_BUILD" "$MT_CLIENT_BUILD"
 
 cp "$TMP"/tailbench-v0.9/masstree/{mttest.o,misc.o,checkpoint.o,masstree.o,value_string.o,value_array.o,value_versioned_array.o,perfstat.o,string_slice.o,kvio.o,libjson.a} "$MT_SERVER_BUILD/"
@@ -180,7 +197,7 @@ mkdir -p "$SPHINX_CLIENT_BUILD/wav"
 tar -xzf "$ARCHIVE" -C "$SPHINX_CLIENT_BUILD/wav" --wildcards --strip-components=3 \
     'tailbench.inputs/sphinx/wav/an4_clstk/*'
 
-for dir in "$MT_SERVER_BUILD" "$MT_CLIENT_BUILD" "$SILO_SERVER_BUILD" "$SILO_CLIENT_BUILD" "$SPHINX_SERVER_BUILD" "$SPHINX_CLIENT_BUILD"; do
+for dir in "$IMGDNN_SERVER_BUILD" "$IMGDNN_CLIENT_BUILD" "$MT_SERVER_BUILD" "$MT_CLIENT_BUILD""$SILO_SERVER_BUILD" "$SILO_CLIENT_BUILD" "$SPHINX_SERVER_BUILD" "$SPHINX_CLIENT_BUILD"; do
     sed 's/recv(fd, reinterpret_cast<void\*>(cur), len, flags)/recv(fd, reinterpret_cast<void*>(cur), remaining, flags)/' \
         "$TMP/tailbench-v0.9/harness/helpers.h" > "$dir/helpers.h"
 done
@@ -205,7 +222,7 @@ tar -xzf "$ARCHIVE" -C "$MOSES_SERVER_BUILD/tailbench.inputs/moses" --strip-comp
     tailbench.inputs/moses/translation-model \
     tailbench.inputs/moses/language-model
 
-echo "Extracted img-dnn artifacts into $SERVER_DIR and $CLIENT_DIR"
+echo "Extracted img-dnn build contexts into $IMGDNN_SERVER_BUILD and $IMGDNN_CLIENT_BUILD"
 echo "Extracted masstree build contexts into $MT_SERVER_BUILD and $MT_CLIENT_BUILD"
 echo "Extracted silo build contexts into $SILO_SERVER_BUILD and $SILO_CLIENT_BUILD"
 echo "Extracted sphinx build contexts into $SPHINX_SERVER_BUILD and $SPHINX_CLIENT_BUILD"

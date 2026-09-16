@@ -1,7 +1,7 @@
 # Binaries and datasets pulled in by extract.sh - regenerate, don't commit
-img-dnn/server/img-dnn_server_networked
+img-dnn/server/build/
 img-dnn/server/model.xml
-img-dnn/client/img-dnn_client_networked
+img-dnn/client/build/
 img-dnn/client/mnist/
 masstree/server/build/
 masstree/client/build/
